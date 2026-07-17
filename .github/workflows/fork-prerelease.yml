@@ -1,0 +1,98 @@
+name: Build fork prerelease
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or commit to build
+        required: true
+        default: fix/798-vm-ip-config-limit
+      tag:
+        description: Prerelease tag
+        required: true
+        default: v0.111.1-ipconfig32.1
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/fork-prerelease.yml
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish fork prerelease
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE_REF: ${{ inputs.ref || 'fix/798-vm-ip-config-limit' }}
+      RELEASE_TAG: ${{ inputs.tag || 'v0.111.1-ipconfig32.1' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/*.sum"
+
+      - name: Build archives
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${RELEASE_TAG#v}"
+          targets=(
+            "linux amd64"
+            "linux arm64"
+            "darwin amd64"
+            "darwin arm64"
+            "windows amd64"
+          )
+
+          mkdir -p dist
+
+          for target in "${targets[@]}"; do
+            read -r goos goarch <<< "${target}"
+            extension=""
+            if [[ "${goos}" == "windows" ]]; then
+              extension=".exe"
+            fi
+
+            binary="terraform-provider-proxmox_v${version}${extension}"
+            archive="terraform-provider-proxmox_${version}_${goos}_${goarch}.zip"
+
+            GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build               -trimpath               -ldflags="-s -w"               -o "dist/${binary}"               .
+
+            (
+              cd dist
+              zip -q "${archive}" "${binary}"
+              rm "${binary}"
+            )
+          done
+
+          (
+            cd dist
+            sha256sum ./*.zip > "terraform-provider-proxmox_${version}_SHA256SUMS"
+          )
+
+      - name: Publish prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_sha="$(git rev-parse HEAD)"
+          notes="Development build from ${SOURCE_REF} (${source_sha}). This is an unofficial fork build for testing PR bpg/terraform-provider-proxmox#3004."
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" dist/* --clobber
+            gh release edit "${RELEASE_TAG}"               --prerelease               --title "${RELEASE_TAG} (fork build)"               --notes "${notes}"
+          else
+            gh release create "${RELEASE_TAG}" dist/*               --target "${SOURCE_REF}"               --prerelease               --title "${RELEASE_TAG} (fork build)"               --notes "${notes}"
+          fi
